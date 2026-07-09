@@ -1,0 +1,6 @@
+{
+  "name": "B&F Chic Boutique",
+  "description": "Marketplace dan Point of Sale (PoS) web application untuk UMKM fashion wanita dan kecantikan, dilengkapi sinkronisasi real-time, cetak nota, dan checkout WhatsApp.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
