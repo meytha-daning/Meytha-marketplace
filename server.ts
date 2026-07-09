@@ -3,9 +3,32 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
+import { createClient } from '@supabase/supabase-js';
+import dotenv from 'dotenv';
+
+// Load environment variables
+dotenv.config();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DB_FILE = path.resolve(__dirname, 'db.json');
+
+// Supabase Configuration
+const supabaseUrl = (process.env.SUPABASE_URL || '').trim();
+const supabaseKey = (process.env.SUPABASE_ANON_KEY || '').trim();
+let isSupabaseConfigured = false;
+let supabase: any = null;
+
+if (supabaseUrl && supabaseKey && supabaseUrl.startsWith('http')) {
+  try {
+    supabase = createClient(supabaseUrl, supabaseKey);
+    isSupabaseConfigured = true;
+    console.log('Supabase is configured! Connected to:', supabaseUrl);
+  } catch (error: any) {
+    console.error('Failed to initialize Supabase client:', error?.message || error);
+  }
+} else {
+  console.log('Supabase is not configured yet or has invalid URL. Falling back to local db.json.');
+}
 
 // Interface declarations
 interface Product {
@@ -165,7 +188,14 @@ function readDB(): DatabaseSchema {
       return initialData;
     }
     const data = fs.readFileSync(DB_FILE, 'utf-8');
-    return JSON.parse(data) as DatabaseSchema;
+    const parsed = JSON.parse(data) as any;
+    
+    // Safety guarantees for each field
+    return {
+      products: Array.isArray(parsed?.products) ? parsed.products : DEFAULT_PRODUCTS,
+      transactions: Array.isArray(parsed?.transactions) ? parsed.transactions : [],
+      buyers: Array.isArray(parsed?.buyers) ? parsed.buyers : []
+    };
   } catch (error) {
     console.error('Error reading file database:', error);
     return { products: DEFAULT_PRODUCTS, transactions: [], buyers: [] };
@@ -180,86 +210,200 @@ function writeDB(data: DatabaseSchema) {
   }
 }
 
+// Supabase DB auto-initializer
+async function initSupabaseDatabase() {
+  if (!supabase) return;
+  console.log('Checking Supabase tables and seeding defaults if empty...');
+  try {
+    // 1. Check & Seed Products
+    const { data: existingProds, error: prodError } = await supabase
+      .from('products')
+      .select('id')
+      .limit(1);
+
+    if (prodError) {
+      console.warn('Could not query "products" table in Supabase. You can create it with the SQL schema listed in the app guides.', prodError.message);
+      return;
+    }
+
+    if (!existingProds || existingProds.length === 0) {
+      console.log('Seeding products table in Supabase...');
+      const { error: seedError } = await supabase.from('products').insert(DEFAULT_PRODUCTS);
+      if (seedError) {
+        console.error('Failed to seed default products in Supabase:', seedError.message);
+      } else {
+        console.log('Products table successfully seeded in Supabase!');
+      }
+    }
+  } catch (error) {
+    console.error('Exception during Supabase initialization check:', error);
+  }
+}
+
 async function startServer() {
   const app = express();
   app.use(express.json());
 
-  // Log request for debugging
+  // Log requests for debugging
   app.use((req, _res, next) => {
     console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
     next();
   });
 
-  // API - LOGIN ENDPOINT
-  app.post('/api/login', (req, res) => {
-    const { email, password, nama } = req.body;
+  // Call Supabase DB auto-seeder
+  if (supabase) {
+    await initSupabaseDatabase();
+  }
 
-    if (!email) {
-      return res.status(400).json({ error: 'Email wajib diisi' });
-    }
-
-    const emailClean = email.trim().toLowerCase();
-
-    // Admin login
-    if (emailClean === 'meythadaning05@gmail.com') {
-      if (password === 'meyta1234' || password === 'meyta123') {
-        return res.json({
-          email: 'meythadaning05@gmail.com',
-          nama: 'Meytha Daning (Admin)',
-          role: 'admin'
-        });
-      } else {
-        return res.status(401).json({ error: 'Password Admin salah' });
-      }
-    }
-
-    // Buyer login/registration
-    const db = readDB();
-    let buyer = db.buyers.find(b => b.email.toLowerCase() === emailClean);
-
-    if (!buyer) {
-      // Register new buyer
-      const newBuyer: Buyer = {
-        email: emailClean,
-        nama: nama ? nama.trim() : 'Pelanggan Cantik',
-        tanggalDaftar: new Date().toISOString()
-      };
-      db.buyers.push(newBuyer);
-      writeDB(db);
-      buyer = newBuyer;
-    } else if (nama) {
-      // Update name if changed
-      buyer.nama = nama.trim();
-      writeDB(db);
-    }
-
-    return res.json({
-      email: buyer.email,
-      nama: buyer.nama,
-      role: 'buyer'
+  // API - SUPABASE CONFIGURATION STATUS
+  app.get('/api/supabase-status', (_req, res) => {
+    res.json({
+      configured: isSupabaseConfigured,
+      url: supabaseUrl ? `${supabaseUrl.substring(0, 15)}...` : null
     });
   });
 
+  // API - LOGIN ENDPOINT
+  app.post('/api/login', async (req, res) => {
+    try {
+      const { email, password, nama } = req.body;
+
+      if (!email) {
+        return res.status(400).json({ error: 'Email wajib diisi' });
+      }
+
+      const emailStr = String(email || '');
+      const emailClean = emailStr.trim().toLowerCase();
+
+      // Admin login
+      if (emailClean === 'meythadaning05@gmail.com') {
+        if (password === 'meyta1234' || password === 'meyta123') {
+          return res.json({
+            email: 'meythadaning05@gmail.com',
+            nama: 'Meytha Daning (Admin)',
+            role: 'admin'
+          });
+        } else {
+          return res.status(401).json({ error: 'Password Admin salah' });
+        }
+      }
+
+      // Buyer login/registration
+      let loggedInBuyer: Buyer | null = null;
+
+      if (supabase) {
+        try {
+          const { data: bData, error: bError } = await supabase
+            .from('buyers')
+            .select('*')
+            .eq('email', emailClean)
+            .maybeSingle();
+
+          if (bError) throw bError;
+
+          if (!bData) {
+            // Register new buyer in Supabase
+            const newBuyer: Buyer = {
+              email: emailClean,
+              nama: nama ? String(nama).trim() : 'Pelanggan Cantik',
+              tanggalDaftar: new Date().toISOString()
+            };
+            const { error: insError } = await supabase.from('buyers').insert(newBuyer);
+            if (insError) throw insError;
+            loggedInBuyer = newBuyer;
+          } else {
+            loggedInBuyer = bData;
+            if (nama && bData.nama !== String(nama).trim()) {
+              // Update name in Supabase
+              const { error: updError } = await supabase
+                .from('buyers')
+                .update({ nama: String(nama).trim() })
+                .eq('email', emailClean);
+              if (!updError) {
+                loggedInBuyer.nama = String(nama).trim();
+              }
+            }
+          }
+        } catch (err: any) {
+          console.error('Supabase login failed, trying file DB fallback:', err?.message || err);
+        }
+      }
+
+      // Fallback if Supabase is inactive or failed
+      if (!loggedInBuyer) {
+        const db = readDB();
+        let buyer = db.buyers.find(b => b && b.email && String(b.email).toLowerCase() === emailClean);
+
+        if (!buyer) {
+          const newBuyer: Buyer = {
+            email: emailClean,
+            nama: nama ? String(nama).trim() : 'Pelanggan Cantik',
+            tanggalDaftar: new Date().toISOString()
+          };
+          db.buyers.push(newBuyer);
+          writeDB(db);
+          buyer = newBuyer;
+        } else if (nama) {
+          buyer.nama = String(nama).trim();
+          writeDB(db);
+        }
+        loggedInBuyer = buyer;
+      }
+
+      return res.json({
+        email: loggedInBuyer.email,
+        nama: loggedInBuyer.nama,
+        role: 'buyer'
+      });
+    } catch (error: any) {
+      console.error('Login error:', error);
+      return res.status(500).json({ error: error?.message || 'Terjadi kesalahan sistem saat login.' });
+    }
+  });
+
   // API - BUYERS ENDPOINT
-  app.get('/api/buyers', (_req, res) => {
+  app.get('/api/buyers', async (_req, res) => {
+    if (supabase) {
+      try {
+        const { data, error } = await supabase.from('buyers').select('*');
+        if (!error && data) {
+          return res.json(data);
+        }
+      } catch (err) {
+        console.error('Supabase get buyers failed:', err);
+      }
+    }
+
     const db = readDB();
     res.json(db.buyers);
   });
 
   // API - PRODUCTS ENDPOINTS
-  app.get('/api/products', (_req, res) => {
+  app.get('/api/products', async (_req, res) => {
+    if (supabase) {
+      try {
+        const { data, error } = await supabase.from('products').select('*').order('id', { ascending: true });
+        if (!error && data) {
+          return res.json(data);
+        } else {
+          console.warn('Supabase product query returned error, falling back to local file:', error?.message);
+        }
+      } catch (err) {
+        console.error('Supabase products failed, fallback to local:', err);
+      }
+    }
+
     const db = readDB();
     res.json(db.products);
   });
 
-  app.post('/api/products', (req, res) => {
+  app.post('/api/products', async (req, res) => {
     const { nama, harga, stok, kategori, urlGambar, keterangan, ukuran } = req.body;
 
     if (!nama || !harga || stok === undefined || !kategori) {
       return res.status(400).json({ error: 'Nama, harga, stok, dan kategori wajib diisi.' });
     }
 
-    const db = readDB();
     const newProduct: Product = {
       id: `prod-${Date.now()}`,
       nama: nama.trim(),
@@ -271,15 +415,63 @@ async function startServer() {
       ukuran: Array.isArray(ukuran) && ukuran.length > 0 ? ukuran : ["All Size"]
     };
 
+    if (supabase) {
+      try {
+        const { error } = await supabase.from('products').insert(newProduct);
+        if (!error) {
+          return res.status(201).json(newProduct);
+        }
+        console.error('Supabase product insert error:', error.message);
+      } catch (err) {
+        console.error('Supabase product insert failed:', err);
+      }
+    }
+
+    const db = readDB();
     db.products.push(newProduct);
     writeDB(db);
 
     res.status(201).json(newProduct);
   });
 
-  app.put('/api/products/:id', (req, res) => {
+  app.put('/api/products/:id', async (req, res) => {
     const { id } = req.params;
     const { nama, harga, stok, kategori, urlGambar, keterangan, ukuran } = req.body;
+
+    if (supabase) {
+      try {
+        // Fetch current product to merge updates
+        const { data: currentProduct, error: fetchErr } = await supabase
+          .from('products')
+          .select('*')
+          .eq('id', id)
+          .maybeSingle();
+
+        if (!fetchErr && currentProduct) {
+          const updatedProduct = {
+            nama: nama !== undefined ? nama.trim() : currentProduct.nama,
+            harga: harga !== undefined ? Number(harga) : currentProduct.harga,
+            stok: stok !== undefined ? Number(stok) : currentProduct.stok,
+            kategori: kategori !== undefined ? kategori : currentProduct.kategori,
+            urlGambar: urlGambar !== undefined ? urlGambar.trim() : currentProduct.urlGambar,
+            keterangan: keterangan !== undefined ? keterangan.trim() : currentProduct.keterangan,
+            ukuran: Array.isArray(ukuran) ? ukuran : currentProduct.ukuran
+          };
+
+          const { error: updateErr } = await supabase
+            .from('products')
+            .update(updatedProduct)
+            .eq('id', id);
+
+          if (!updateErr) {
+            return res.json({ id, ...updatedProduct });
+          }
+          console.error('Supabase edit product error:', updateErr.message);
+        }
+      } catch (err) {
+        console.error('Supabase edit product exception:', err);
+      }
+    }
 
     const db = readDB();
     const index = db.products.findIndex(p => p.id === id);
@@ -303,8 +495,21 @@ async function startServer() {
     res.json(db.products[index]);
   });
 
-  app.delete('/api/products/:id', (req, res) => {
+  app.delete('/api/products/:id', async (req, res) => {
     const { id } = req.params;
+
+    if (supabase) {
+      try {
+        const { error } = await supabase.from('products').delete().eq('id', id);
+        if (!error) {
+          return res.json({ message: 'Produk berhasil dihapus.' });
+        }
+        console.error('Supabase delete product error:', error.message);
+      } catch (err) {
+        console.error('Supabase delete product failed:', err);
+      }
+    }
+
     const db = readDB();
     const index = db.products.findIndex(p => p.id === id);
 
@@ -318,14 +523,51 @@ async function startServer() {
   });
 
   // API - TRANSACTIONS ENDPOINTS
-  app.get('/api/transactions', (_req, res) => {
+  app.get('/api/transactions', async (_req, res) => {
+    if (supabase) {
+      try {
+        const { data, error } = await supabase.from('transactions').select('*');
+        if (!error && data) {
+          // Parse itemDibeli if it comes back as string (some Supabase types require parsing)
+          const parsedData = data.map((trans: any) => ({
+            ...trans,
+            itemDibeli: typeof trans.itemDibeli === 'string' ? JSON.parse(trans.itemDibeli) : trans.itemDibeli
+          }));
+          return res.json(parsedData);
+        }
+      } catch (err) {
+        console.error('Supabase transactions query error:', err);
+      }
+    }
+
     const db = readDB();
     res.json(db.transactions);
   });
 
-  // Fetch a specific transaction (no auth required, for Nota Online check)
-  app.get('/api/transactions/:id', (req, res) => {
+  // Fetch a specific transaction
+  app.get('/api/transactions/:id', async (req, res) => {
     const { id } = req.params;
+
+    if (supabase) {
+      try {
+        const { data, error } = await supabase
+          .from('transactions')
+          .select('*')
+          .eq('id', id)
+          .maybeSingle();
+
+        if (!error && data) {
+          const trans = {
+            ...data,
+            itemDibeli: typeof data.itemDibeli === 'string' ? JSON.parse(data.itemDibeli) : data.itemDibeli
+          };
+          return res.json(trans);
+        }
+      } catch (err) {
+        console.error('Supabase transactions single fetch error:', err);
+      }
+    }
+
     const db = readDB();
     const trans = db.transactions.find(t => t.id === id);
     if (!trans) {
@@ -334,23 +576,20 @@ async function startServer() {
     res.json(trans);
   });
 
-  // Checkout (Create pending or PoS successful transaction)
-  app.post('/api/transactions', (req, res) => {
+  // Checkout (Create transaction)
+  app.post('/api/transactions', async (req, res) => {
     const { itemDibeli, pembeliNama, pembeliEmail, tipeTransaksi } = req.body;
 
     if (!itemDibeli || !Array.isArray(itemDibeli) || itemDibeli.length === 0) {
       return res.status(400).json({ error: 'Item belanja tidak boleh kosong.' });
     }
 
-    const db = readDB();
-    
     // Calculate total price
     let totalHarga = 0;
     for (const item of itemDibeli) {
       totalHarga += item.product.harga * item.quantity;
     }
 
-    // Creating transaction ID
     const transId = `nota-${Date.now()}`;
     const newTransaction: Transaction = {
       id: transId,
@@ -363,7 +602,36 @@ async function startServer() {
       tipeTransaksi: tipeTransaksi || 'Online'
     };
 
-    // If it's Kasir (walk-in checkout), reduce stock immediately!
+    if (supabase) {
+      try {
+        // If it's Kasir (walk-in checkout), deduct stock immediately in Supabase
+        if (tipeTransaksi === 'Kasir') {
+          for (const item of itemDibeli) {
+            const { data: prod, error: fErr } = await supabase
+              .from('products')
+              .select('stok')
+              .eq('id', item.product.id)
+              .maybeSingle();
+
+            if (!fErr && prod) {
+              const nextStok = Math.max(0, prod.stok - item.quantity);
+              await supabase.from('products').update({ stok: nextStok }).eq('id', item.product.id);
+            }
+          }
+        }
+
+        const { error } = await supabase.from('transactions').insert(newTransaction);
+        if (!error) {
+          return res.status(201).json(newTransaction);
+        }
+        console.error('Supabase transaction insert failed:', error.message);
+      } catch (err) {
+        console.error('Supabase transaction exception:', err);
+      }
+    }
+
+    // Fallback file DB write
+    const db = readDB();
     if (tipeTransaksi === 'Kasir') {
       for (const item of itemDibeli) {
         const prodIndex = db.products.findIndex(p => p.id === item.product.id);
@@ -379,9 +647,60 @@ async function startServer() {
     res.status(201).json(newTransaction);
   });
 
-  // Confirm payment & deduct stock automatically (triggers from Buyer's Nota Online)
-  app.post('/api/transactions/:id/confirm-payment', (req, res) => {
+  // Confirm payment & deduct stock automatically
+  app.post('/api/transactions/:id/confirm-payment', async (req, res) => {
     const { id } = req.params;
+
+    if (supabase) {
+      try {
+        const { data: trans, error: fErr } = await supabase
+          .from('transactions')
+          .select('*')
+          .eq('id', id)
+          .maybeSingle();
+
+        if (!fErr && trans) {
+          const transObj = {
+            ...trans,
+            itemDibeli: typeof trans.itemDibeli === 'string' ? JSON.parse(trans.itemDibeli) : trans.itemDibeli
+          };
+
+          if (transObj.statusPembayaran === 'Pending') {
+            // Update status to success
+            const { error: updErr } = await supabase
+              .from('transactions')
+              .update({ statusPembayaran: 'Pembayaran Sukses' })
+              .eq('id', id);
+
+            if (!updErr) {
+              transObj.statusPembayaran = 'Pembayaran Sukses';
+
+              // Reduce stocks in Supabase
+              for (const item of transObj.itemDibeli) {
+                const { data: pData } = await supabase
+                  .from('products')
+                  .select('stok')
+                  .eq('id', item.product.id)
+                  .maybeSingle();
+
+                if (pData) {
+                  const nextStok = Math.max(0, pData.stok - item.quantity);
+                  await supabase.from('products').update({ stok: nextStok }).eq('id', item.product.id);
+                }
+              }
+
+              return res.json({ message: 'Pembayaran berhasil dikonfirmasi. Stok otomatis berkurang.', transaction: transObj });
+            }
+          } else {
+            return res.json({ message: 'Transaksi ini sudah berstatus pembayaran sukses sebelumnya.', transaction: transObj });
+          }
+        }
+      } catch (err) {
+        console.error('Supabase confirm-payment failed, trying fallback:', err);
+      }
+    }
+
+    // Fallback confirm payment
     const db = readDB();
     const transIndex = db.transactions.findIndex(t => t.id === id);
 
@@ -391,11 +710,9 @@ async function startServer() {
 
     const transaction = db.transactions[transIndex];
 
-    // Deduct stock only if status transitions from Pending to Pembayaran Sukses
     if (transaction.statusPembayaran === 'Pending') {
       transaction.statusPembayaran = 'Pembayaran Sukses';
 
-      // Reduce stock for products
       for (const item of transaction.itemDibeli) {
         const prodIndex = db.products.findIndex(p => p.id === item.product.id);
         if (prodIndex !== -1) {

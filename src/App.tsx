@@ -127,6 +127,16 @@ export default function App() {
   // Selected transaction detail in modal
   const [selectedTransaction, setSelectedTransaction] = useState<Transaction | null>(null);
 
+  // Supabase connection status
+  const [supabaseStatus, setSupabaseStatus] = useState<{ configured: boolean; url: string | null }>({ configured: false, url: null });
+
+  useEffect(() => {
+    fetch('/api/supabase-status')
+      .then(res => res.json())
+      .then(data => setSupabaseStatus(data))
+      .catch(err => console.error('Error fetching Supabase status:', err));
+  }, []);
+
   // Synchronize cart with LocalStorage
   useEffect(() => {
     localStorage.setItem('boutique_cart', JSON.stringify(cart));
@@ -254,12 +264,19 @@ export default function App() {
         })
       });
 
-      if (!response.ok) {
-        const err = await response.json();
-        throw new Error(err.error || 'Gagal melakukan login');
+      const resText = await response.text();
+      let resJson: any = null;
+      try {
+        resJson = JSON.parse(resText);
+      } catch {
+        // Response is not JSON
       }
 
-      const loggedUser: LoggedInUser = await response.json();
+      if (!response.ok) {
+        throw new Error(resJson?.error || resText || 'Gagal melakukan login');
+      }
+
+      const loggedUser: LoggedInUser = resJson;
       setUser(loggedUser);
       localStorage.setItem('boutique_user', JSON.stringify(loggedUser));
       
@@ -291,12 +308,19 @@ export default function App() {
         })
       });
 
-      if (!response.ok) {
-        const err = await response.json();
-        throw new Error(err.error || 'Gagal masuk lewat Google');
+      const resText = await response.text();
+      let resJson: any = null;
+      try {
+        resJson = JSON.parse(resText);
+      } catch {
+        // Response is not JSON
       }
 
-      const loggedUser: LoggedInUser = await response.json();
+      if (!response.ok) {
+        throw new Error(resJson?.error || resText || 'Gagal masuk lewat Google');
+      }
+
+      const loggedUser: LoggedInUser = resJson;
       setUser(loggedUser);
       localStorage.setItem('boutique_user', JSON.stringify(loggedUser));
       
@@ -1233,9 +1257,11 @@ Link Nota Online:
 
         <div className="flex items-center gap-4">
           {/* Synchronized status label indicator */}
-          <div className="hidden md:flex items-center gap-1.5 text-xs text-neutral-400">
-            <span className="h-2 w-2 bg-green-500 rounded-full animate-pulse"></span>
-            <span>Tersambung Real-Time</span>
+          <div className="hidden md:flex items-center gap-2 text-xs text-neutral-300 bg-neutral-800 py-1.5 px-3.5 rounded-full border border-neutral-700/80">
+            <span className={`h-2 w-2 rounded-full ${supabaseStatus.configured ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`}></span>
+            <span className="font-medium">
+              {supabaseStatus.configured ? 'Database Cloud (Supabase)' : 'Database Lokal (Fallback)'}
+            </span>
           </div>
 
           {/* User Name Badge next to cart */}
@@ -1520,6 +1546,90 @@ Link Nota Online:
                             </div>
                           </button>
                         </div>
+                      </div>
+
+                      {/* Supabase & Vercel Integration Panel */}
+                      <div className="bg-white rounded-3xl p-6 border border-neutral-100 shadow-sm space-y-4">
+                        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2 border-b border-neutral-100 pb-4">
+                          <div>
+                            <h4 className="font-serif font-bold text-lg text-neutral-800 flex items-center gap-2">
+                              <span>🚀 Integrasi Cloud (Supabase & Vercel)</span>
+                            </h4>
+                            <p className="text-xs text-neutral-400 mt-1">Status dan panduan konfigurasi database online untuk katalog produk & login</p>
+                          </div>
+                          <span className={`px-3 py-1 text-xs font-bold rounded-full ${
+                            supabaseStatus.configured 
+                              ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' 
+                              : 'bg-amber-50 text-amber-700 border border-amber-200'
+                          }`}>
+                            {supabaseStatus.configured ? '⚡ Terhubung Supabase' : '⚠️ Mode Fallback Lokal'}
+                          </span>
+                        </div>
+
+                        {supabaseStatus.configured ? (
+                          <div className="bg-emerald-50/50 p-4 rounded-2xl border border-emerald-100/50 text-xs text-emerald-800 space-y-2">
+                            <p className="font-bold">Koneksi Supabase Anda Berhasil Diaktifkan!</p>
+                            <p>Semua produk katalog, data pembeli/login, dan transaksi tersimpan real-time ke cloud database Supabase Anda. Anda dapat meng-export proyek ini dan men-deploy-nya secara langsung ke Vercel dengan aman!</p>
+                          </div>
+                        ) : (
+                          <div className="space-y-4">
+                            <div className="bg-amber-50/60 p-4 rounded-2xl border border-amber-100/60 text-xs text-amber-950 leading-relaxed">
+                              <p className="font-bold mb-1">Aplikasi saat ini berjalan menggunakan Database JSON Lokal.</p>
+                              <p>Agar katalog produk bisa tersimpan permanen di Supabase dan aplikasi siap dipublikasikan ke Vercel, ikuti panduan konfigurasi di bawah ini.</p>
+                            </div>
+
+                            <div className="space-y-3">
+                              <h5 className="text-xs font-bold text-neutral-700">Langkah 1: Setup Tabel di Supabase SQL Editor</h5>
+                              <p className="text-2xs text-neutral-500">Salin dan jalankan script SQL berikut di panel SQL Editor proyek Supabase Anda untuk membuat tabel:</p>
+                              <pre className="bg-neutral-900 text-neutral-200 p-4 rounded-xl text-2xs overflow-x-auto font-mono max-h-40 selection:bg-rose-900 select-all">
+{`-- 1. Tabel Produk
+create table products (
+  id text primary key,
+  nama text not null,
+  harga int8 not null,
+  stok int8 not null,
+  kategori text not null,
+  "urlGambar" text,
+  keterangan text,
+  ukuran text[]
+);
+
+-- 2. Tabel Pembeli
+create table buyers (
+  email text primary key,
+  nama text not null,
+  "tanggalDaftar" text not null
+);
+
+-- 3. Tabel Transaksi
+create table transactions (
+  id text primary key,
+  tanggal text not null,
+  "totalHarga" int8 not null,
+  "itemDibeli" jsonb not null,
+  "pembeliNama" text not null,
+  "pembeliEmail" text not null,
+  "statusPembayaran" text not null,
+  "tipeTransaksi" text not null
+);`}
+                              </pre>
+                            </div>
+
+                            <div className="space-y-2 text-xs text-neutral-600">
+                              <h5 className="font-bold text-neutral-700">Langkah 2: Isi Variabel Lingkungan (Environment Variables)</h5>
+                              <p className="text-2xs text-neutral-500">Buka menu **Secrets** atau **Environment Variables** di platform ini, lalu tambahkan:</p>
+                              <ul className="list-disc pl-5 space-y-1 text-2xs">
+                                <li><code>SUPABASE_URL</code> = (Diambil dari Project Settings &gt; API di Supabase)</li>
+                                <li><code>SUPABASE_ANON_KEY</code> = (Diambil dari Project Settings &gt; API &gt; <code>anon</code> <code>public</code> key)</li>
+                              </ul>
+                            </div>
+
+                            <div className="space-y-2 text-xs text-neutral-600">
+                              <h5 className="font-bold text-neutral-700">Langkah 3: Deploy Proyek ke Vercel</h5>
+                              <p className="text-2xs text-neutral-500">Gunakan menu ekspor zip / GitHub, hubungkan repositori Anda ke Vercel, lalu daftarkan kedua variabel di atas di pengaturan **Environment Variables** proyek Vercel Anda. Server full-stack Express + Vite ini akan langsung berjalan normal di Vercel!</p>
+                            </div>
+                          </div>
+                        )}
                       </div>
                     </div>
                   ) : (
